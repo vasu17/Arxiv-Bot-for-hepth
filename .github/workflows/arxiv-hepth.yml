@@ -43,7 +43,7 @@ jobs:
       - name: Post today’s New submissions
         env:
           TELEGRAM_BOT_TOKEN: 6913247875:AAErZkRQxAK8vy91Nj-qoc7GIWHN4d1LgPE
-          TELEGRAM_CHAT_ID: https://t.me/Arxiv_Hepth
+          TELEGRAM_CHAT_ID: -1002111560453
         run: |
           python Arxiv-Bot-for-hepth/Arxiv_bot.py --once --chat "${TELEGRAM_CHAT_ID}"
 
