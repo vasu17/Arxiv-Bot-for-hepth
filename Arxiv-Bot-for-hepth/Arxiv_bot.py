@@ -125,7 +125,7 @@ def _inspire_author_link(name: str) -> str:
     # Use an exactauthor search on Inspire HEP.
     # Example: https://inspirehep.net/authors?search=exactauthor%3A%22First%20Last%22
     q = quote(f'"{name}"')
-    return f"https://inspirehep.net/authors?search=exactauthor%3A{q}"
+    return f"https://inspirehep.net/authors?sort=bestmatch&size=25&page=1&q={q}"
 
 
 def format_entry_html(entry: dict) -> str:
