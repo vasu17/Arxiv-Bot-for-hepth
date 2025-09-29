@@ -17,6 +17,15 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      - name: Skip weekends (Europe/Berlin)
+        id: skip_weekend
+        run: |
+          DOW=$(TZ=Europe/Berlin date +%u)
+          if [ "$DOW" -ge 6 ]; then
+            echo "Today is weekend (Sat/Sun in Europe/Berlin). Skipping run."
+            exit 0
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -33,6 +42,31 @@ jobs:
             exit 0
           fi
 
+      - name: Get last successful run timestamp
+        id: last_success
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          API_URL="https://api.github.com/repos/${GH_REPO}/actions/workflows/Scheduler.yml/runs?status=success&per_page=1"
+          JSON=$(curl -sSf -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$API_URL")
+          # Parse via Python to avoid jq dependency
+          LAST_SUCCESS_AT=$(python - << 'PY'
+import json, os, sys
+data=json.loads(os.environ['JSON'])
+runs=data.get('workflow_runs', [])
+if runs:
+    # Use updated_at if available, else run_started_at/created_at
+    ts = runs[0].get('updated_at') or runs[0].get('run_started_at') or runs[0].get('created_at')
+    if ts:
+        print(ts)
+        sys.exit(0)
+print("")
+PY
+          )
+          echo "last_success_at=${LAST_SUCCESS_AT}" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -42,5 +76,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          LAST_SUCCESS_AT: ${{ steps.last_success.outputs.last_success_at }}
         run: |
           python Arxiv-Bot-for-hepth/Arxiv_bot.py --once --chat "${TELEGRAM_CHAT_ID}"
