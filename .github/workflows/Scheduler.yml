@@ -4,7 +4,16 @@ on:
   schedule:
     # 06:00 UTC covers 08:00 during summer (CEST=UTC+2)
     - cron: "0 6 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Run regardless of time/weekend guards"
+        required: false
+        default: "false"
+      test_only:
+        description: "Send a test message and exit"
+        required: false
+        default: "false"
 
 permissions:
   contents: read
@@ -19,6 +28,7 @@ jobs:
     steps:
       - name: Skip weekends (Europe/Berlin)
         id: skip_weekend
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.force_run != 'true' }}
         run: |
           DOW=$(TZ=Europe/Berlin date +%u)
           if [ "$DOW" -ge 6 ]; then
@@ -35,6 +45,7 @@ jobs:
           python-version: "3.12"
 
       - name: Ensure run time is 08:00 in Europe/Berlin
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.force_run != 'true' }}
         run: |
           HOUR=$(TZ=Europe/Berlin date +%H)
           if [ "$HOUR" != "08" ]; then
@@ -72,7 +83,16 @@ PY
           python -m pip install --upgrade pip
           pip install -r Arxiv-Bot-for-hepth/requirements.txt
 
+      - name: Test bot token
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_only == 'true' }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python Arxiv-Bot-for-hepth/Arxiv_bot.py --test --chat "${TELEGRAM_CHAT_ID}"
+
       - name: Post today’s New submissions
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.test_only != 'true' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
