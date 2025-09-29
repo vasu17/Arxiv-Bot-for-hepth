@@ -2,11 +2,12 @@ import argparse
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import quote
 
 import requests
+from typing import Optional
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -200,6 +201,79 @@ def run_once_and_post(chat_id: str) -> None:
         time.sleep(1.2)
 
 
+def _is_weekend_berlin(now: Optional[datetime] = None) -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception:  # pragma: no cover
+        ZoneInfo = None  # type: ignore
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    if ZoneInfo is not None:
+        berlin = ZoneInfo("Europe/Berlin")
+        dow = now.astimezone(berlin).weekday()
+    else:
+        dow = now.weekday()  # fallback UTC
+    return dow >= 5  # 5=Sat, 6=Sun
+
+
+def _parse_iso8601(value: str) -> Optional[datetime]:
+    try:
+        if not value:
+            return None
+        # Handle trailing Z
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _arxiv_latest_updated_iso() -> Optional[datetime]:
+    """Query arXiv API for latest updated entry time in hep-th.
+
+    Returns a timezone-aware datetime in UTC, or None on failure.
+    """
+    url = (
+        "https://export.arxiv.org/api/query?"
+        "search_query=cat:hep-th&sortBy=lastUpdatedDate&sortOrder=descending&max_results=1"
+    )
+    try:
+        r = requests.get(url, timeout=30, headers={"User-Agent": "hepth-bot/1.0"})
+        r.raise_for_status()
+        text = r.text
+        # Minimal parse to find <updated>...</updated> of first <entry>
+        # Avoid adding feedparser dependency.
+        start = text.find("<entry>")
+        if start == -1:
+            return None
+        u1 = text.find("<updated>", start)
+        u2 = text.find("</updated>", u1)
+        if u1 == -1 or u2 == -1:
+            return None
+        val = text[u1 + len("<updated>") : u2].strip()
+        dt = _parse_iso8601(val)
+        if dt is not None and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def _should_skip_for_no_update_since(last_success_iso: Optional[str]) -> bool:
+    if not last_success_iso:
+        return False
+    last_dt = _parse_iso8601(last_success_iso)
+    if last_dt is None:
+        return False
+    latest = _arxiv_latest_updated_iso()
+    if latest is None:
+        # If we cannot determine, do not skip to avoid missing posts
+        return False
+    return latest <= last_dt
+
+
 def seconds_until_next_8am_cet(now_utc: datetime | None = None) -> int:
     # CET/CEST handling: derive 8am in Europe/Berlin local time
     try:
@@ -304,6 +378,23 @@ def main(argv=None):
         info = get_chat(chat_id)
         print(info)
         return
+
+    # Weekend guard (belt-and-suspenders with workflow-level guard)
+    if _is_weekend_berlin():
+        print("Weekend detected (Europe/Berlin). Skipping run.")
+        return
+
+    # Skip if arXiv hasn't updated since last successful run (avoid reposting after holidays)
+    last_success = os.getenv("LAST_SUCCESS_AT", "").strip()
+    try:
+        if _should_skip_for_no_update_since(last_success):
+            print(
+                f"No arXiv updates since last success ({last_success}). Skipping run."
+            )
+            return
+    except Exception:
+        # Non-fatal
+        pass
 
     if args.once:
         run_once_and_post(chat_id)
