@@ -49,6 +49,3 @@ Repository Structure (key files)
 - Requirements: `Arxiv-Bot-for-hepth/requirements.txt`
 - GitHub Actions workflow: `.github/workflows/Scheduler.yml`
 - Helper scripts: `Arxiv-Bot-for-hepth/run_once.sh`, `Arxiv-Bot-for-hepth/run_daily.sh`
-
-License
-- See the repository’s license or headers (if present). If none is specified, treat it as all-rights-reserved.
