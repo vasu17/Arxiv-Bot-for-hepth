@@ -11,7 +11,7 @@ What’s New (AI-authored changes)
 - These changes were written with the help of an AI coding assistant.
 
 How It Works
-- Workflow schedule: `.github/workflows/Scheduler.yml` triggers daily at 06:00 UTC and then checks that the local time in Europe/Berlin is 08:00. If not, it exits.
+- Workflow schedule: `.github/workflows/Scheduler.yml` triggers daily at 06:00 UTC
 - Weekend guard (workflow): The workflow detects Europe/Berlin day-of-week and exits on Saturday/Sunday.
 - Weekend guard (bot): The Python script also checks Europe/Berlin day-of-week and returns early if run on weekends (belt-and-suspenders for manual runs).
 - Update check: The workflow fetches the last successful run time and sets `LAST_SUCCESS_AT`. The bot then calls arXiv’s API for `hep-th`, finds the latest updated timestamp, and skips posting if it isn’t newer than `LAST_SUCCESS_AT`.
