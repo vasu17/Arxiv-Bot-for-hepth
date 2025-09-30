@@ -34,14 +34,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Ensure run time is 08:00 in Europe/Berlin
-        run: |
-          HOUR=$(TZ=Europe/Berlin date +%H)
-          if [ "$HOUR" != "08" ]; then
-            echo "Not 08:00 Europe/Berlin (now $HOUR) — skipping."
-            exit 0
-          fi
-
       - name: Get last successful run timestamp
         id: last_success
         env:
