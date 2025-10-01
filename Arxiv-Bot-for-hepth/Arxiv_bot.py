@@ -379,22 +379,27 @@ def main(argv=None):
         print(info)
         return
 
+    force_post = os.getenv("FORCE_POST", "").strip().lower() in {"1", "true", "yes", "on"}
+    if force_post:
+        print("FORCE_POST enabled — bypassing weekend/no-update guards.")
+
     # Weekend guard (belt-and-suspenders with workflow-level guard)
-    if _is_weekend_berlin():
+    if not force_post and _is_weekend_berlin():
         print("Weekend detected (Europe/Berlin). Skipping run.")
         return
 
     # Skip if arXiv hasn't updated since last successful run (avoid reposting after holidays)
     last_success = os.getenv("LAST_SUCCESS_AT", "").strip()
     try:
-        if _should_skip_for_no_update_since(last_success):
+        if not force_post and _should_skip_for_no_update_since(last_success):
             print(
                 f"No arXiv updates since last success ({last_success}). Skipping run."
             )
             return
     except Exception:
-        # Non-fatal
-        pass
+        if not force_post:
+            # Non-fatal
+            pass
 
     if args.once:
         run_once_and_post(chat_id)

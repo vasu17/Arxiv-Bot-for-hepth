@@ -76,5 +76,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           LAST_SUCCESS_AT: ${{ steps.last_success.outputs.last_success_at }}
+          FORCE_POST: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: |
           python Arxiv-Bot-for-hepth/Arxiv_bot.py --once --chat "${TELEGRAM_CHAT_ID}"
