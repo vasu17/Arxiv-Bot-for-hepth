@@ -3,7 +3,7 @@ name: ArXiv hep-th daily
 on:
   schedule:
     # 06:00 UTC covers 08:00 during summer (CEST=UTC+2)
-    - cron: "0 6 * * *"
+    - cron: "0 5 * * *"
   workflow_dispatch: {}
 
 permissions:
