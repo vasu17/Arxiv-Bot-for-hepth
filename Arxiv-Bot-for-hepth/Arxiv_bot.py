@@ -1,16 +1,45 @@
 import argparse
+import json
 import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from html import escape
+from pathlib import Path
 from urllib.parse import quote
 
 import requests
-from typing import Optional
+from typing import Optional, Tuple
 
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+STATE_DIR = Path(__file__).with_name(".state")
+STATE_PATH = STATE_DIR / "posted.json"
+MAX_TRACKED_IDS = 2000
+
+
+def _load_state() -> Tuple[set[str], Optional[str]]:
+    if not STATE_PATH.exists():
+        return set(), None
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        posted = set(data.get("posted_ids", []))
+        last_run = data.get("last_run_iso")
+        return posted, last_run
+    except Exception:
+        return set(), None
+
+
+def _save_state(posted_ids: set[str], last_run_iso: str) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ids = sorted(posted_ids)
+    if len(ids) > MAX_TRACKED_IDS:
+        ids = ids[-MAX_TRACKED_IDS:]
+    STATE_PATH.write_text(
+        json.dumps({"posted_ids": ids, "last_run_iso": last_run_iso}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def send_message(chat_id: str, text: str, parse_mode: str = "HTML") -> dict:
@@ -111,6 +140,7 @@ def _extract_entries_after_header(soup):
 
             entries.append(
                 {
+                    "id": abs_url.rsplit("/abs/", 1)[1] if abs_url and "/abs/" in abs_url else "",
                     "title": title,
                     "authors": authors,
                     "comments": comments,
@@ -191,14 +221,44 @@ def scrape_hep_th_new() -> list:
     return entries
 
 
+def _extract_entry_id(entry: dict) -> Optional[str]:
+    candidate = entry.get("id") or ""
+    candidate = candidate.strip()
+    if candidate:
+        return candidate
+    abs_url = entry.get("abs_url") or ""
+    if "/abs/" in abs_url:
+        return abs_url.rsplit("/abs/", 1)[-1]
+    return None
+
+
 def run_once_and_post(chat_id: str) -> None:
     entries = scrape_hep_th_new()
+    posted_ids, _ = _load_state()
+    newly_posted: list[str] = []
+
     for entry in entries:
+        entry_id = _extract_entry_id(entry)
+        if entry_id and entry_id in posted_ids:
+            continue
+
         msg = format_entry_html(entry)
-        if msg:
-            send_message(chat_id, msg, parse_mode="HTML")
+        if not msg:
+            continue
+
+        send_message(chat_id, msg, parse_mode="HTML")
+        newly_posted.append(entry_id or "")
+        if entry_id:
+            posted_ids.add(entry_id)
+
         # be nice to Telegram API: ~1 msg/sec to a single chat
         time.sleep(1.2)
+
+    if newly_posted:
+        _save_state(posted_ids, datetime.now(timezone.utc).isoformat())
+        print(f"Posted {len([i for i in newly_posted if i])} new submissions.")
+    else:
+        print("No new submissions to post.")
 
 
 def _is_weekend_berlin(now: Optional[datetime] = None) -> bool:
@@ -216,62 +276,6 @@ def _is_weekend_berlin(now: Optional[datetime] = None) -> bool:
     else:
         dow = now.weekday()  # fallback UTC
     return dow >= 5  # 5=Sat, 6=Sun
-
-
-def _parse_iso8601(value: str) -> Optional[datetime]:
-    try:
-        if not value:
-            return None
-        # Handle trailing Z
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def _arxiv_latest_updated_iso() -> Optional[datetime]:
-    """Query arXiv API for latest updated entry time in hep-th.
-
-    Returns a timezone-aware datetime in UTC, or None on failure.
-    """
-    url = (
-        "https://export.arxiv.org/api/query?"
-        "search_query=cat:hep-th&sortBy=lastUpdatedDate&sortOrder=descending&max_results=1"
-    )
-    try:
-        r = requests.get(url, timeout=30, headers={"User-Agent": "hepth-bot/1.0"})
-        r.raise_for_status()
-        text = r.text
-        # Minimal parse to find <updated>...</updated> of first <entry>
-        # Avoid adding feedparser dependency.
-        start = text.find("<entry>")
-        if start == -1:
-            return None
-        u1 = text.find("<updated>", start)
-        u2 = text.find("</updated>", u1)
-        if u1 == -1 or u2 == -1:
-            return None
-        val = text[u1 + len("<updated>") : u2].strip()
-        dt = _parse_iso8601(val)
-        if dt is not None and dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return None
-
-
-def _should_skip_for_no_update_since(last_success_iso: Optional[str]) -> bool:
-    if not last_success_iso:
-        return False
-    last_dt = _parse_iso8601(last_success_iso)
-    if last_dt is None:
-        return False
-    latest = _arxiv_latest_updated_iso()
-    if latest is None:
-        # If we cannot determine, do not skip to avoid missing posts
-        return False
-    return latest <= last_dt
 
 
 def seconds_until_next_8am_cet(now_utc: datetime | None = None) -> int:
@@ -402,6 +406,8 @@ def main(argv=None):
             pass
 
     if args.once:
+        if force_post:
+            print("FORCE_POST enabled — weekend guard bypassed but duplicates still suppressed.")
         run_once_and_post(chat_id)
         print("Posted current new submissions.")
         return

@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  actions: read
 
 concurrency:
   group: arxiv-hepth-bot
@@ -35,36 +34,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Get last successful run timestamp
-        id: last_success
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          API_URL="https://api.github.com/repos/${GH_REPO}/actions/workflows/Scheduler.yml/runs?status=success&per_page=1"
-          # Capture body and HTTP code to avoid failing on non-200
-          RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" "$API_URL" || true)
-          BODY=$(printf '%s' "$RESP" | sed '$d')
-          CODE=$(printf '%s' "$RESP" | tail -n1)
-          if [ "$CODE" != "200" ]; then
-            echo "GitHub API returned $CODE; proceeding without LAST_SUCCESS_AT"
-            echo "last_success_at=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          JSON="$BODY"
-          if command -v jq >/dev/null 2>&1; then
-            LAST_SUCCESS_AT=$(printf '%s' "$JSON" | jq -r '.workflow_runs[0] | (.updated_at // .run_started_at // .created_at // "")')
-          else
-            LAST_SUCCESS_AT=$(printf '%s' "$JSON" | sed -n 's/.*"updated_at"[:[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-            if [ -z "$LAST_SUCCESS_AT" ]; then
-              LAST_SUCCESS_AT=$(printf '%s' "$JSON" | sed -n 's/.*"run_started_at"[:[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-            fi
-            if [ -z "$LAST_SUCCESS_AT" ]; then
-              LAST_SUCCESS_AT=$(printf '%s' "$JSON" | sed -n 's/.*"created_at"[:[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
-            fi
-          fi
-          echo "last_success_at=${LAST_SUCCESS_AT}" >> "$GITHUB_OUTPUT"
+      - name: Restore posted state
+        uses: actions/cache/restore@v4
+        with:
+          path: Arxiv-Bot-for-hepth/.state
+          key: arxiv-state-${{ github.run_id }}
+          restore-keys: |
+            arxiv-state-
 
       - name: Install dependencies
         run: |
@@ -75,7 +51,14 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          LAST_SUCCESS_AT: ${{ steps.last_success.outputs.last_success_at }}
           FORCE_POST: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
         run: |
           python Arxiv-Bot-for-hepth/Arxiv_bot.py --once --chat "${TELEGRAM_CHAT_ID}"
+
+      - name: Save posted state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: Arxiv-Bot-for-hepth/.state
+          key: arxiv-state-${{ github.run_id }}
+          if-no-files-found: ignore

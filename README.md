@@ -3,18 +3,19 @@ ArXiv hep-th Telegram bot
 Overview
 - Posts the daily “New submissions” from arXiv hep-th to a Telegram chat/channel.
 - Runs via GitHub Actions at 08:00 Europe/Berlin and politely rates limits messages.
-- Skips weekends and avoids reposting after holidays by checking if arXiv has actually updated since the last successful run.
+- Skips weekends and avoids reposting by remembering which arXiv IDs were already published.
 
 What’s New (AI-authored changes)
 - Weekend skip: The workflow and the bot both exit on Saturday/Sunday (Europe/Berlin) so no weekend posts.
-- No reposts after holidays: Before posting, the bot queries arXiv’s API for the most recent update in hep-th and compares it to the timestamp of the last successful GitHub Actions run. If arXiv hasn’t updated since then, the bot exits without posting.
+- No reposts after holidays: The bot caches previously posted arXiv IDs in `.state/posted.json` (restored via GitHub Actions cache). Any submission already seen is skipped, even across weekends/holidays.
+- Manual override for tests: `workflow_dispatch` runs set `FORCE_POST=1`, bypassing only the weekend guard so you can rerun the workflow without waiting for the next morning.
 - These changes were written with the help of an AI coding assistant.
 
 How It Works
-- Workflow schedule: `.github/workflows/Scheduler.yml` triggers daily at 06:00 UTC
+- Workflow schedule: `.github/workflows/Scheduler.yml` triggers daily at 06:00 UTC.
 - Weekend guard (workflow): The workflow detects Europe/Berlin day-of-week and exits on Saturday/Sunday.
 - Weekend guard (bot): The Python script also checks Europe/Berlin day-of-week and returns early if run on weekends (belt-and-suspenders for manual runs).
-- Update check: The workflow fetches the last successful run time and sets `LAST_SUCCESS_AT`. The bot then calls arXiv’s API for `hep-th`, finds the latest updated timestamp, and skips posting if it isn’t newer than `LAST_SUCCESS_AT`.
+- Stateful dedupe: `actions/cache` restores `.state/posted.json`; the bot adds newly posted IDs and saves it back. If nothing new is found, it logs “No new submissions to post.”
 
 Configuration
 - Environment variables (required):
@@ -34,14 +35,14 @@ If you want to use this bot for other arXiv categories or pages, change two plac
   - File: `Arxiv-Bot-for-hepth/Arxiv_bot.py`
   - Function: `scrape_hep_th_new()`
   - Change `url = "https://arxiv.org/list/hep-th/new"` to a different list path, e.g. `https://arxiv.org/list/cs.CL/new` or any other category `.../list/<category>/new`.
-- Update detection (API query):
+- Dedupe cache:
   - File: `Arxiv-Bot-for-hepth/Arxiv_bot.py`
-  - Function: `_arxiv_latest_updated_iso()`
-  - Change the query string `search_query=cat:hep-th` to your category, e.g. `search_query=cat:cs.CL`.
+  - Functions: `_load_state()`, `_save_state()`, and `_extract_entry_id()`
+  - The cache records posted arXiv IDs. It works for any category without modification once the scrape URL is updated.
 
 Notes
 - The Inspire author link building is generic and does not depend on the arXiv category.
-- No extra Python dependencies were added; the arXiv “updated” check uses a minimal XML substring parse to avoid adding a feed parser.
+- No extra Python dependencies beyond `requests` and `beautifulsoup4`.
 - Timezone logic uses Europe/Berlin to align the run with the original target audience/time.
 
 Repository Structure (key files)
