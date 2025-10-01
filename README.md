@@ -2,17 +2,17 @@ ArXiv hep-th Telegram bot
 
 Overview
 - Posts the daily “New submissions” from arXiv hep-th to a Telegram chat/channel.
-- Runs via GitHub Actions at 08:00 Europe/Berlin and politely rates limits messages.
-- Skips weekends and avoids reposting by remembering which arXiv IDs were already published.
+- Runs via GitHub Actions at 07:00 Europe/Berlin and politely rates limits messages. The timing might be off due to issues with workflow but it does eventually appear
+- Skips weekends and avoids reposting by remembering which arXiv IDs were already published. Implemented weekend skip but the holiday skip is wip
 
 What’s New (AI-authored changes)
 - Weekend skip: The workflow and the bot both exit on Saturday/Sunday (Europe/Berlin) so no weekend posts.
 - No reposts after holidays: The bot caches previously posted arXiv IDs in `.state/posted.json` (restored via GitHub Actions cache). Any submission already seen is skipped, even across weekends/holidays.
 - Manual override for tests: `workflow_dispatch` runs set `FORCE_POST=1`, bypassing only the weekend guard so you can rerun the workflow without waiting for the next morning.
-- These changes were written with the help of an AI coding assistant.
+- These changes were written with the help of an Codex CLI.
 
 How It Works
-- Workflow schedule: `.github/workflows/Scheduler.yml` triggers daily at 06:00 UTC.
+- Workflow schedule: `.github/workflows/Scheduler.yml` triggers daily at 05:00 UTC.
 - Weekend guard (workflow): The workflow detects Europe/Berlin day-of-week and exits on Saturday/Sunday.
 - Weekend guard (bot): The Python script also checks Europe/Berlin day-of-week and returns early if run on weekends (belt-and-suspenders for manual runs).
 - Stateful dedupe: `actions/cache` restores `.state/posted.json`; the bot adds newly posted IDs and saves it back. If nothing new is found, it logs “No new submissions to post.”
@@ -27,7 +27,7 @@ Local Usage
 - One-off run:
   - `Arxiv-Bot-for-hepth/run_once.sh` requires both env vars set, creates a venv, installs deps, and posts the current “New submissions”.
 - Daemon (self-hosted):
-  - `Arxiv-Bot-for-hepth/run_daily.sh` runs a simple daily scheduler at 08:00 CET/CEST. For GitHub Actions, the workflow already handles scheduling.
+  - `Arxiv-Bot-for-hepth/run_daily.sh` runs a simple daily scheduler at 07:00 CET/CEST. For GitHub Actions, the workflow already handles scheduling.
 
 Adapting To Other arXiv Categories
 If you want to use this bot for other arXiv categories or pages, change two places:
