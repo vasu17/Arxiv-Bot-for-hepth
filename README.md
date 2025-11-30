@@ -5,7 +5,7 @@ Overview
 - Runs via GitHub Actions at 07:00 Europe/Berlin and politely rates limits messages. The timing might be off due to issues with workflow but it does eventually appear
 - Skips weekends and avoids reposting by remembering which arXiv IDs were already published. Implemented weekend skip but the holiday skip is wip
 
-What’s New (AI-authored changes)
+What’s new (AI-authored changes)
 - Weekend skip: The workflow and the bot both exit on Saturday/Sunday (Europe/Berlin) so no weekend posts.
 - No reposts after holidays: The bot caches previously posted arXiv IDs in `.state/posted.json` (restored via GitHub Actions cache). Any submission already seen is skipped, even across weekends/holidays.
 - Manual override for tests: `workflow_dispatch` runs set `FORCE_POST=1`, bypassing only the weekend guard so you can rerun the workflow without waiting for the next morning.
