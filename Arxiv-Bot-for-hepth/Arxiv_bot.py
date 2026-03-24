@@ -163,13 +163,28 @@ def format_entry_html(entry: dict) -> str:
     # Build the message using HTML parse_mode for hyperlinks
     title = escape(entry.get("title", "")).strip()
     comments = escape(entry.get("comments", "")).strip()
-    abstract = escape(entry.get("abstract", "")).strip()
+    
+    raw_abstract = entry.get("abstract", "").strip()
+    # Truncate abstract if it's too long to prevent going over Telegram's 4096 limit
+    # Safe abstract length
+    if len(raw_abstract) > 1500:
+        raw_abstract = raw_abstract[:1500] + "..."
+    abstract = escape(raw_abstract)
 
     # Authors with Inspire links
     linked_authors = []
-    for name in entry.get("authors", []):
-        url = _inspire_author_link(name)
-        linked_authors.append(f'<a href="{url}">{escape(name)}</a>')
+    authors_list = entry.get("authors", [])
+    if len(authors_list) > 15:
+        # truncate large author lists and add 'et al.' instead of breaking HTML links
+        authors_list = authors_list[:15]
+        authors_list.append("et al.")
+        
+    for name in authors_list:
+        if name == "et al.":
+            linked_authors.append("et al.")
+        else:
+            url = _inspire_author_link(name)
+            linked_authors.append(f'<a href="{url}">{escape(name)}</a>')
     authors_html = ", ".join(linked_authors) if linked_authors else ""
 
     parts = []
@@ -193,10 +208,6 @@ def format_entry_html(entry: dict) -> str:
         parts.extend(link_lines)
 
     text = "\n".join(parts)
-
-    # Telegram message limit is 4096 characters
-    if len(text) > 4000:
-        text = text[:3950] + "..."
     return text
 
 
