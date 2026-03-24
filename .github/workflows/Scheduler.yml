@@ -1,4 +1,6 @@
 name: ArXiv hep-th daily
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 on:
   schedule:
@@ -61,4 +63,3 @@ jobs:
         with:
           path: Arxiv-Bot-for-hepth/.state
           key: arxiv-state-${{ github.run_id }}
-          if-no-files-found: ignore
