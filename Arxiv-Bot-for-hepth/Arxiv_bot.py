@@ -163,28 +163,60 @@ def format_entry_html(entry: dict) -> str:
     # Build the message using HTML parse_mode for hyperlinks
     title = escape(entry.get("title", "")).strip()
     comments = escape(entry.get("comments", "")).strip()
-    
     raw_abstract = entry.get("abstract", "").strip()
-    # Truncate abstract if it's too long to prevent going over Telegram's 4096 limit
-    # Safe abstract length
-    if len(raw_abstract) > 1500:
-        raw_abstract = raw_abstract[:1500] + "..."
-    abstract = escape(raw_abstract)
+    
+    abs_url = entry.get("abs_url") or ""
+    pdf_url = entry.get("pdf_url") or ""
+    link_lines = []
+    if abs_url:
+        link_lines.append(f'HTML:- <a href="{abs_url}">arXiv</a>')
+    if pdf_url:
+        link_lines.append(f'PDF:- <a href="{pdf_url}">PDF</a>')
 
-    # Authors with Inspire links
-    linked_authors = []
+    base_parts = []
+    if title:
+        base_parts.append(f"Title:- {title}")
+    if comments:
+        base_parts.append(f"Comment:- {comments}")
+    if link_lines:
+        base_parts.extend(link_lines)
+    
+    base_text_len = sum(len(p) for p in base_parts) + len(base_parts)
+    budget = 3950 - base_text_len
+    
+    abstract_html = escape(raw_abstract)
+    if len(abstract_html) > budget - 30:
+        safe_cut = max(0, budget - 30)
+        if safe_cut > 3:
+            raw_abstract = raw_abstract[:safe_cut - 3] + "..."
+            abstract_html = escape(raw_abstract)
+            if len(abstract_html) > budget - 30:
+                abstract_html = abstract_html[:budget - 30]
+    
+    remaining_budget = budget - len(f"Abstract:- {abstract_html}") - 1
+    
     authors_list = entry.get("authors", [])
-    if len(authors_list) > 15:
-        # truncate large author lists and add 'et al.' instead of breaking HTML links
-        authors_list = authors_list[:15]
-        authors_list.append("et al.")
+    linked_authors = []
+    
+    current_authors_len = 9 # Length roughly to account for "Author:- " prefix
+    for i, name in enumerate(authors_list):
+        url = _inspire_author_link(name)
+        author_html = f'<a href="{url}">{escape(name)}</a>'
         
-    for name in authors_list:
-        if name == "et al.":
-            linked_authors.append("et al.")
+        future_len = current_authors_len + len(author_html)
+        if i < len(authors_list) - 1:
+            if future_len + 10 > remaining_budget:
+                linked_authors.append("et al.")
+                break
+            else:
+                linked_authors.append(author_html)
+                current_authors_len += len(author_html) + 2 # For ", "
         else:
-            url = _inspire_author_link(name)
-            linked_authors.append(f'<a href="{url}">{escape(name)}</a>')
+            if future_len > remaining_budget:
+                linked_authors.append("et al.")
+            else:
+                linked_authors.append(author_html)
+
     authors_html = ", ".join(linked_authors) if linked_authors else ""
 
     parts = []
@@ -194,16 +226,8 @@ def format_entry_html(entry: dict) -> str:
         parts.append(f"Author:- {authors_html}")
     if comments:
         parts.append(f"Comment:- {comments}")
-    if abstract:
-        parts.append(f"Abstract:- {abstract}")
-    # Add arXiv HTML/PDF links when available
-    abs_url = entry.get("abs_url") or ""
-    pdf_url = entry.get("pdf_url") or ""
-    link_lines = []
-    if abs_url:
-        link_lines.append(f'HTML:- <a href="{abs_url}">arXiv</a>')
-    if pdf_url:
-        link_lines.append(f'PDF:- <a href="{pdf_url}">PDF</a>')
+    if abstract_html:
+        parts.append(f"Abstract:- {abstract_html}")
     if link_lines:
         parts.extend(link_lines)
 
