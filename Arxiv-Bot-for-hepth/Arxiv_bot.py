@@ -12,14 +12,28 @@ import requests
 from typing import Optional, Tuple
 
 
+# ─── Configuration ───────────────────────────────────────────────────────────
+# Telegram bot token, injected via environment variable by the GitHub Actions workflow.
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
+# Persistent state: tracks which arXiv IDs have already been posted to avoid duplicates.
+# Stored as a JSON file alongside this script in a .state/ directory.
 STATE_DIR = Path(__file__).with_name(".state")
 STATE_PATH = STATE_DIR / "posted.json"
-MAX_TRACKED_IDS = 2000
+MAX_TRACKED_IDS = 2000  # Cap to prevent the state file from growing indefinitely
 
 
 def _load_state() -> Tuple[set[str], Optional[str]]:
+    """Load the persisted deduplication state from disk.
+
+    Returns:
+        A tuple of (posted_ids, last_run_iso) where:
+        - posted_ids: set of arXiv IDs that have already been sent to Telegram.
+        - last_run_iso: ISO-8601 timestamp of the last successful run, or None.
+
+    If the state file is missing or corrupt, returns empty defaults so the bot
+    can still run (it will just re-post everything visible on the "new" page).
+    """
     if not STATE_PATH.exists():
         return set(), None
     try:
@@ -32,6 +46,15 @@ def _load_state() -> Tuple[set[str], Optional[str]]:
 
 
 def _save_state(posted_ids: set[str], last_run_iso: str) -> None:
+    """Persist the deduplication state to disk.
+
+    Args:
+        posted_ids: The full set of arXiv IDs that have been posted so far.
+        last_run_iso: ISO-8601 timestamp to record as the last successful run.
+
+    The set is sorted and trimmed to MAX_TRACKED_IDS (oldest removed first)
+    to prevent unbounded growth of the state file over months of operation.
+    """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     ids = sorted(posted_ids)
     if len(ids) > MAX_TRACKED_IDS:
@@ -43,6 +66,20 @@ def _save_state(posted_ids: set[str], last_run_iso: str) -> None:
 
 
 def send_message(chat_id: str, text: str, parse_mode: str = "HTML") -> dict:
+    """Send a message to a Telegram chat via the Bot API.
+
+    Args:
+        chat_id: Telegram chat/channel identifier (numeric ID or @username).
+        text: Message body (may contain HTML tags when parse_mode is HTML).
+        parse_mode: Telegram parse mode — 'HTML' or 'Markdown'.
+
+    Returns:
+        The Telegram API JSON response dict.
+
+    Implements exponential back-off retry (up to 6 attempts) when the API
+    returns HTTP 429 (rate-limited). Web page previews are disabled to keep
+    messages compact.
+    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
@@ -68,6 +105,14 @@ def send_message(chat_id: str, text: str, parse_mode: str = "HTML") -> dict:
 
 
 def get_chat(chat_id: str) -> dict:
+    """Retrieve chat metadata from Telegram (used by --check-chat).
+
+    Args:
+        chat_id: Telegram chat/channel identifier.
+
+    Returns:
+        The Telegram API JSON response containing chat title, type, etc.
+    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChat"
     resp = requests.get(url, params={"chat_id": chat_id}, timeout=30)
     resp.raise_for_status()
@@ -75,8 +120,18 @@ def get_chat(chat_id: str) -> dict:
 
 
 def _iter_new_submission_nodes(soup):
-    # Find the H3 header for New submissions, then yield the sequence of
-    # alternating <dt>/<dd> nodes up to (but not including) the next <h3>.
+    """Yield <dt> and <dd> DOM nodes from the 'New submissions' section.
+
+    Walks the arXiv listing page HTML: finds the <h3> containing
+    'New submissions', then yields every sibling <dt>/<dd> node until
+    the next <h3> (which marks the start of Cross-listings or Replacements).
+
+    Args:
+        soup: A BeautifulSoup object of the arXiv /list/hep-th/new page.
+
+    Yields:
+        BeautifulSoup Tag objects (only <dt> and <dd> elements).
+    """
     for h3 in soup.find_all("h3"):
         if "New submissions" in h3.get_text(strip=True):
             node = h3.next_sibling
@@ -91,7 +146,20 @@ def _iter_new_submission_nodes(soup):
 
 
 def _extract_entries_after_header(soup):
-    # Build (dt, dd) pairs from the stream of nodes after the H3 header.
+    """Parse all new arXiv submissions into structured dicts.
+
+    Pairs up <dt> (metadata links) and <dd> (title/authors/abstract) nodes
+    from _iter_new_submission_nodes, then extracts:
+      - arXiv ID, abs URL, PDF URL
+      - Title, author names, comments, abstract text
+
+    Args:
+        soup: A BeautifulSoup object of the arXiv /list/hep-th/new page.
+
+    Returns:
+        A list of dicts, each with keys: id, title, authors, comments,
+        abstract, abs_url, pdf_url.
+    """
     entries = []
     pending_dt = None
     for node in _iter_new_submission_nodes(soup):
@@ -153,14 +221,35 @@ def _extract_entries_after_header(soup):
 
 
 def _inspire_author_link(name: str) -> str:
-    # Use an exactauthor search on Inspire HEP.
-    # Example: https://inspirehep.net/authors?search=exactauthor%3A%22First%20Last%22
+    """Build an INSPIRE HEP search URL for a given author name.
+
+    Args:
+        name: Author's full name (e.g. "Edward Witten").
+
+    Returns:
+        A URL string linking to an INSPIRE exactauthor search for that name.
+    """
     q = quote(f'"{name}"')
     return f"https://inspirehep.net/authors?sort=bestmatch&size=25&page=1&q={q}"
 
 
 def format_entry_html(entry: dict) -> str:
-    # Build the message using HTML parse_mode for hyperlinks
+    """Format a single arXiv entry dict into an HTML Telegram message.
+
+    Constructs a message with Title, Author (linked to INSPIRE), Comment,
+    Abstract, and arXiv/PDF links.  Telegram messages are capped at ~4096
+    characters, so this function uses a budget system:
+      1. Compute the length of fixed fields (title, comments, links).
+      2. Allocate remaining space to the abstract (truncated with '...' if needed).
+      3. Fill remaining budget with author links, falling back to 'et al.'
+         when the list would exceed the limit.
+
+    Args:
+        entry: A dict with keys from _extract_entries_after_header.
+
+    Returns:
+        An HTML-formatted string ready for Telegram's sendMessage API.
+    """
     title = escape(entry.get("title", "")).strip()
     comments = escape(entry.get("comments", "")).strip()
     raw_abstract = entry.get("abstract", "").strip()
@@ -236,6 +325,18 @@ def format_entry_html(entry: dict) -> str:
 
 
 def scrape_hep_th_new() -> list:
+    """Scrape today's new hep-th submissions from the arXiv website.
+
+    Fetches https://arxiv.org/list/hep-th/new, parses the HTML with
+    BeautifulSoup, and returns structured entry dicts.
+
+    Returns:
+        A list of entry dicts (see _extract_entries_after_header).
+
+    Raises:
+        RuntimeError: If beautifulsoup4 is not installed.
+        requests.HTTPError: If the arXiv page returns a non-200 status.
+    """
     url = "https://arxiv.org/list/hep-th/new"
     # Lazy import to avoid requiring bs4 for --test path
     try:
@@ -257,6 +358,16 @@ def scrape_hep_th_new() -> list:
 
 
 def _extract_entry_id(entry: dict) -> Optional[str]:
+    """Extract the arXiv ID from an entry dict.
+
+    Tries the 'id' field first; if empty, falls back to parsing the abs_url.
+
+    Args:
+        entry: A parsed arXiv entry dict.
+
+    Returns:
+        The arXiv ID string (e.g. '2405.12345'), or None if not found.
+    """
     candidate = entry.get("id") or ""
     candidate = candidate.strip()
     if candidate:
@@ -268,6 +379,21 @@ def _extract_entry_id(entry: dict) -> Optional[str]:
 
 
 def run_once_and_post(chat_id: str) -> None:
+    """Scrape arXiv hep-th/new and post all *unseen* entries to Telegram.
+
+    This is the core bot loop for a single run:
+      1. Scrape today's new submissions.
+      2. Load the set of previously-posted IDs from the state file.
+      3. For each entry not in the posted set, format and send it.
+      4. Save the updated state (with the new IDs) to disk.
+
+    The posted_ids dedup mechanism is the primary protection against sending
+    the same paper twice — even if the GitHub Actions scheduler fires
+    multiple times in one day.
+
+    Args:
+        chat_id: Telegram chat/channel to post messages to.
+    """
     entries = scrape_hep_th_new()
     posted_ids, _ = _load_state()
     newly_posted: list[str] = []
@@ -297,6 +423,18 @@ def run_once_and_post(chat_id: str) -> None:
 
 
 def _is_weekend_berlin(now: Optional[datetime] = None) -> bool:
+    """Check whether the current day is Saturday or Sunday in Europe/Berlin.
+
+    Used as a belt-and-suspenders guard alongside the cron schedule
+    (which already targets Mon-Fri) to ensure arXiv is not scraped on
+    weekends when no new papers are posted.
+
+    Args:
+        now: Optional datetime for testing; defaults to current UTC time.
+
+    Returns:
+        True if it is Saturday or Sunday in Europe/Berlin.
+    """
     try:
         from zoneinfo import ZoneInfo
     except Exception:  # pragma: no cover
@@ -314,7 +452,18 @@ def _is_weekend_berlin(now: Optional[datetime] = None) -> bool:
 
 
 def seconds_until_next_8am_cet(now_utc: datetime | None = None) -> int:
-    # CET/CEST handling: derive 8am in Europe/Berlin local time
+    """Calculate seconds until the next 08:00 in Europe/Berlin.
+
+    Used by the daemon loop to sleep until the next posting window.
+    Handles CET/CEST transitions via zoneinfo; falls back to a fixed
+    UTC+1 offset if zoneinfo is unavailable.
+
+    Args:
+        now_utc: Optional current UTC datetime for testing.
+
+    Returns:
+        Number of seconds (int) to wait.
+    """
     try:
         from zoneinfo import ZoneInfo  # Python 3.9+
     except Exception:  # pragma: no cover
@@ -343,6 +492,18 @@ def seconds_until_next_8am_cet(now_utc: datetime | None = None) -> int:
 
 
 def run_daemon(chat_id: str) -> None:
+    """Run the bot as a long-lived daemon process (--daemon mode).
+
+    Sleeps until 08:00 Europe/Berlin, posts new submissions, then
+    loops forever.  On error, attempts to send the traceback to the
+    Telegram chat for remote debugging.
+
+    Note: This mode is NOT used by the GitHub Actions scheduler — the
+    workflow uses --once instead.  This is for self-hosted deployments.
+
+    Args:
+        chat_id: Telegram chat/channel to post to.
+    """
     while True:
         try:
             delay = seconds_until_next_8am_cet()
@@ -363,6 +524,23 @@ def run_daemon(chat_id: str) -> None:
 
 
 def main(argv=None):
+    """CLI entry point — parse arguments and dispatch to the appropriate mode.
+
+    Modes:
+        --test        Send a test message and exit.
+        --check-chat  Print chat metadata and exit.
+        --once        Scrape & post once, then exit (used by GitHub Actions).
+        --daemon      Run forever, posting daily at 08:00 CET.
+        (default)     Send a configuration confirmation message.
+
+    Environment variables:
+        TELEGRAM_BOT_TOKEN  (required) Bot API token.
+        TELEGRAM_CHAT_ID    Fallback chat ID if --chat is not provided.
+        FORCE_POST          Set to '1' to bypass weekend/holiday guards.
+
+    Args:
+        argv: Optional argument list for testing; defaults to sys.argv.
+    """
     parser = argparse.ArgumentParser(description="ArXiv hep-th bot")
     parser.add_argument(
         "--chat",
