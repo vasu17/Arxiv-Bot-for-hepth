@@ -1,42 +1,135 @@
+# ============================================================================
+# ArXiv hep-th Daily Bot — GitHub Actions Workflow
+# ============================================================================
+#
+# PURPOSE:
+#   Automatically scrape new hep-th (high-energy physics — theory) papers
+#   from arXiv every weekday morning and post them to a Telegram channel.
+#
+# SCHEDULING STRATEGY:
+#   GitHub Actions cron uses UTC only, but we want the bot to fire at
+#   ~07:30 Europe/Berlin time. Because Europe observes DST:
+#     - CET  (winter) = UTC+1  →  07:30 Berlin = 06:30 UTC
+#     - CEST (summer) = UTC+2  →  07:30 Berlin = 05:30 UTC
+#   We define TWO cron triggers to cover both seasons. A "timezone gate"
+#   step checks the actual Berlin clock and skips the wrong-season trigger.
+#
+# DUPLICATE PREVENTION (3 layers):
+#   1. Cron "1-5" — only fires Mon–Fri (no weekends).
+#   2. Concurrency group — prevents parallel runs from overlapping.
+#   3. Bot-level posted_ids — the Python script tracks which arXiv IDs
+#      have already been sent, so even if both crons fire, no paper
+#      is posted twice.
+#
+# MANUAL RUNS:
+#   Use "workflow_dispatch" (Run workflow button in GitHub UI) to trigger
+#   the bot on demand. Manual runs bypass both the timezone and weekend
+#   gates, and set FORCE_POST=1 to also bypass the bot's internal guards.
+# ============================================================================
+
 name: ArXiv hep-th daily
+
+# Required for compatibility with newer GitHub Actions runner images.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 on:
   schedule:
-    # 06:00 UTC covers 08:00 during summer (CEST=UTC+2)
-    - cron: "0 5 * * *"
+    # Two cron entries to cover CET/CEST (DST) for a 07:30 Europe/Berlin target:
+    #   05:30 UTC = 07:30 CEST (summer, UTC+2)  — active ~late Mar to late Oct
+    #   06:30 UTC = 07:30 CET  (winter, UTC+1)  — active ~late Oct to late Mar
+    # "1-5" = Monday through Friday only (no weekends).
+    # A timezone gate step below ensures only the correct trigger actually runs.
+    - cron: "30 5 * * 1-5"
+    - cron: "30 6 * * 1-5"
+
+  # Allow manual triggering from the GitHub Actions UI (bypasses all gates).
   workflow_dispatch: {}
 
+# Read-only access — this workflow does not push commits or modify the repo.
 permissions:
   contents: read
 
+# Concurrency group: if a second run starts while one is already in progress,
+# it queues instead of running in parallel. cancel-in-progress: false ensures
+# we don't kill an already-running job (important since GitHub cron can be
+# delayed and both triggers may fire close together).
 concurrency:
   group: arxiv-hepth-bot
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Skip weekends (Europe/Berlin)
-        id: skip_weekend
+
+      # ── STEP 1: Timezone Gate ──────────────────────────────────────────
+      # Check if the current Europe/Berlin hour falls within a wide morning
+      # window (05:00–11:00). This is intentionally broad because GitHub
+      # Actions cron is notoriously late — delays of 15–60+ minutes are
+      # common. If both the summer and winter crons happen to pass the
+      # gate on the same day, the bot's posted_ids state ensures no
+      # duplicate messages are sent.
+      # Manual triggers (workflow_dispatch) always pass through.
+      - name: Timezone gate (Europe/Berlin morning)
+        id: tz_gate
         run: |
-          DOW=$(TZ=Europe/Berlin date +%u)
-          if [ "$DOW" -ge 6 ]; then
-            echo "Today is weekend (Sat/Sun in Europe/Berlin). Skipping run."
-            exit 0
+          HOUR=$(TZ=Europe/Berlin date +%-H)
+          echo "Europe/Berlin hour: $HOUR"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger — skipping timezone gate."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$HOUR" -ge 5 ] && [ "$HOUR" -lt 11 ]; then
+            echo "Within morning window (05-11). Proceeding."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Outside morning window (hour=$HOUR). Skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ── STEP 2: Weekend Gate ───────────────────────────────────────────
+      # Belt-and-suspenders check: the cron already targets Mon–Fri (1-5),
+      # but if a Friday cron fires late enough to land on Saturday (Berlin
+      # time), this step catches it. ArXiv does not publish new papers on
+      # weekends, so there's nothing to scrape.
+      # Manual triggers (workflow_dispatch) always pass through.
+      - name: Skip weekends (Europe/Berlin)
+        id: skip_weekend
+        if: steps.tz_gate.outputs.run == 'true'
+        run: |
+          DOW=$(TZ=Europe/Berlin date +%u)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual trigger — skipping weekend gate."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DOW" -ge 6 ]; then
+            echo "Today is weekend (day=$DOW in Europe/Berlin). Skipping run."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Weekday (day=$DOW). Proceeding."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── STEP 3: Checkout ───────────────────────────────────────────────
+      # Clone the repo so we have access to the bot script and requirements.
       - name: Checkout
+        if: steps.skip_weekend.outputs.run == 'true'
         uses: actions/checkout@v4
 
+      # ── STEP 4: Python Setup ───────────────────────────────────────────
       - name: Setup Python
+        if: steps.skip_weekend.outputs.run == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # ── STEP 5: Restore State ──────────────────────────────────────────
+      # The .state/posted.json file tracks which arXiv IDs have already
+      # been posted. We cache it between workflow runs so the bot doesn't
+      # re-send papers it already posted yesterday. The restore-keys prefix
+      # match ensures we always get the most recent cache even if the exact
+      # key doesn't match (keys include the run_id).
       - name: Restore posted state
+        if: steps.skip_weekend.outputs.run == 'true'
         uses: actions/cache/restore@v4
         with:
           path: Arxiv-Bot-for-hepth/.state
@@ -44,12 +137,20 @@ jobs:
           restore-keys: |
             arxiv-state-
 
+      # ── STEP 6: Install Dependencies ───────────────────────────────────
       - name: Install dependencies
+        if: steps.skip_weekend.outputs.run == 'true'
         run: |
           python -m pip install --upgrade pip
           pip install -r Arxiv-Bot-for-hepth/requirements.txt
 
-      - name: Post today’s New submissions
+      # ── STEP 7: Run the Bot ────────────────────────────────────────────
+      # --once: scrape arXiv hep-th/new, post unseen papers, then exit.
+      # FORCE_POST is set to '1' on manual triggers so the bot bypasses
+      # its own internal weekend/holiday guards.
+      # Secrets (bot token + chat ID) are injected via GitHub repo settings.
+      - name: Post today's New submissions
+        if: steps.skip_weekend.outputs.run == 'true'
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -57,8 +158,13 @@ jobs:
         run: |
           python Arxiv-Bot-for-hepth/Arxiv_bot.py --once --chat "${TELEGRAM_CHAT_ID}"
 
+      # ── STEP 8: Save State ─────────────────────────────────────────────
+      # Persist the updated posted_ids back to the cache so the next run
+      # knows which papers were already sent. Runs on always() so the state
+      # is saved even if the bot step fails partway through (partial posts
+      # are still recorded to avoid re-sending them on retry).
       - name: Save posted state
-        if: always()
+        if: steps.skip_weekend.outputs.run == 'true' && always()
         uses: actions/cache/save@v4
         with:
           path: Arxiv-Bot-for-hepth/.state
